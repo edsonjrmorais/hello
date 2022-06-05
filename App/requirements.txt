@@ -1,0 +1,5 @@
+flask
+firebase_admin
+pre-commit
+pytest
+python-dotenv

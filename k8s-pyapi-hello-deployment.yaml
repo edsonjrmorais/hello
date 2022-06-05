@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pyapi-hello
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: pyapi-hello
+  name: pyapi-hello-deployment
+  labels:
+    app: pyapi-hello
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: pyapi-hello
+  template:
+    metadata:
+      labels:
+        app: pyapi-hello
+    spec:
+      containers:
+      - name: pyapi-hello
+        image: edsonjrmorais/hello:1.0
+        ports:
+        - containerPort: 8181
