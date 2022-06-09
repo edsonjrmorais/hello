@@ -3,15 +3,30 @@ kind: Namespace
 metadata:
   name: pyapi-hello
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyapi-hello
+  namespace: pyapi-hello
+spec:
+  type: ClusterIP
+  selector:
+    app: pyapi-hello
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8181
+      targetPort: 8181
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   namespace: pyapi-hello
-  name: pyapi-hello-deployment
+  name: pyapi-hello
   labels:
     app: pyapi-hello
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: pyapi-hello
