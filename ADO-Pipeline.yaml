@@ -1,0 +1,288 @@
+---
+
+# ADO Marketplace Reference:
+## https://marketplace.visualstudio.com/items?itemName=charleszipp.azure-pipelines-tasks-terraform
+## https://marketplace.visualstudio.com/items?itemName=LakshayKaushik.PublishHTMLReports&ssr=false#overview
+
+variables:
+  - group: DevOps-Global-Variables
+    # Variables inside this group:
+    ## AWS_REGION        = "eu-west-1"
+    ## docker_repo_name  = "edsonjrmorais/hello"
+    ## short_commmit_tag = ${{ format('{0}{1}{2}{3}{4}{5}{6}', variables['Build.SourceVersion'][0], variables['Build.SourceVersion'][1], variables['Build.SourceVersion'][2], variables['Build.SourceVersion'][3], variables['Build.SourceVersion'][4], variables['Build.SourceVersion'][5], variables['Build.SourceVersion'][6]) }}
+    ## DATABASE_URL      = "https://hellopyapi-default-rtdb.firebaseio.com/"
+    ## k8s_host          = "https://192.168.1.92:8443"
+
+trigger: none
+
+stages:
+  ####################################
+  #          App Static Tests        #
+  ####################################
+  - stage: AppSourceCodeTests
+    displayName: App Source Code Tests
+    dependsOn: []
+    jobs:    
+    - job: PyTests
+      displayName: PyTests
+      pool:
+        vmImage: 'windows-2019'
+      steps:
+
+        - task: UsePythonVersion@0
+          displayName: 'Use Python 3.x'
+
+        - script: |
+            pip install pytest
+            pip install pytest-cov
+          displayName: Installing Python Libs
+
+        - script: |
+            python -m pytest tests --doctest-modules --junitxml=junit/test-results.xml --cov=. --cov-report=xml --cov-report=html
+          displayName: Running Python Tests
+          workingDirectory: '$(System.DefaultWorkingDirectory)/App'
+
+        - task: PublishTestResults@2
+          displayName: 'Publish Python Test Results'
+          inputs:
+            testResultsFiles: '**/*.xml'
+            failTaskOnFailedTests: true
+            testRunTitle: 'Python Tests Result'
+            searchFolder: '$(System.DefaultWorkingDirectory)/App/junit'
+          continueOnError: true
+
+        - task: publishhtmlreport@1
+          displayName: 'Publish HTML of Python Test Results'
+          inputs:
+            htmlType: 'genericHTML'
+            htmlPath: '$(System.DefaultWorkingDirectory)/App/htmlcov'
+
+  ####################################
+  #   Build, Test and Push the App   #
+  ####################################
+  - stage: AppBuildTestPush
+    displayName: App Build, Test and Push
+    dependsOn: 
+      - AppSourceCodeTests
+    jobs:    
+    - job: Build App
+      displayName: Build App
+      pool:
+        vmImage: 'windows-2019'
+      steps:
+
+        - task: Docker@2
+          displayName: Login to Docker Registry
+          inputs:
+            command: login
+            containerRegistry: dockerRegistryServiceConnection # S.C for the private Docker Registry!
+
+        - task: DownloadSecureFile@1
+          name: GoogleFireBaseServiceAccount
+          displayName: Downloading Google Fire Base S.A JSON
+          inputs:
+            secureFile: GoogleFireBaseServiceAccount.json
+
+        - task: CopyFiles@2
+          inputs:
+            sourceFolder: $(GoogleFireBaseServiceAccount.secureFilePath)
+            targetFolder: '$(System.DefaultWorkingDirectory)/App/'
+
+        - task: Docker@2
+          displayName: Build App image
+          inputs:
+            repository: $(docker_repo_name)
+            command: build
+            Dockerfile: $(System.DefaultWorkingDirectory)/App/Dockerfile
+            arguments: --build-arg DATABASE_URL=$(DATABASE_URL) --build-arg CREDENTIAL_PATH=$(GoogleFireBaseServiceAccount.secureFilePath)
+            tags: |
+              latest
+              $(short_commmit_tag)
+
+        - task: AWSShellScript@1
+          displayName: Scanning App Image
+          inputs:
+            awsCredentials: AWSServiceConnection # S.C for the AWS ; In case the company use AWS ECR as the private Docker repository!
+            regionName: $(AWS_REGION)
+            scriptType: 'inline'
+            inlineScript: |
+              $(aws ecr describe-image-scan-findings --repository-name "$(printf "%s" "${docker_repo_name##*/}")" --image-id imageTag="$(short_commmit_tag)" --region "${AWS_REGION}" --output json > get_build_findings.txt)
+          # According to the Company Security Policy, we can parse the file "get_build_findings.txt" to stop the pipeline or not!
+
+        # Also, we can add here setps for a local app tests, like E2E, Integration, Contract, BDD, Security, before move on!
+
+        - task: Docker@2
+          displayName: Push Docker Image App
+          inputs:
+            command: push
+            repository: $(docker_repo_name)
+            tags: |
+              latest
+              $(short_commmit_tag)
+
+  ####################################
+  #         Deploying  the App       #
+  ####################################
+
+  # Considering that the company is using TF Cloud to manage the TF State!
+
+  - stage: AppDeploy
+    displayName: App Deploy
+    dependsOn: 
+      - AppBuildTestPush
+    jobs:    
+      - job: TFPlan
+        displayName: TF Plan
+        pool: 
+          vmImage: 'ubuntu-20.04'
+        steps:
+        
+          - task: DownloadSecureFile@1
+            name: TFCloudCredential
+            displayName: Downloading .terraformrc
+            inputs:
+              secureFile: .terraformrc
+
+          - task: DownloadSecureFile@1
+            name: TF_cluster_ca_certificate
+            displayName: Downloading cluster_ca_certificate
+            inputs:
+              secureFile: cluster_ca_certificate.crt
+
+          - task: DownloadSecureFile@1
+            name: TF_client_key
+            displayName: Downloading client_key
+            inputs:
+              secureFile: client_key.key
+
+          - task: DownloadSecureFile@1
+            name: TF_client_certificate
+            displayName: Downloading client_certificate
+            inputs:
+              secureFile: client_certificate.crt
+          
+          - task: Bash@3
+            displayName: Terraform Plan
+            inputs:
+              pwsh: true
+              targetType: 'inline'
+              workingDirectory: $(System.DefaultWorkingDirectory)/IaC
+              script: |
+                cp .terraformrc $HOME/$(TFCloudCredential.secureFilePath)
+                terraform init
+                terraform validate
+                terraform plan
+            env:
+              TF_cluster_ca_certificate: $(TF_cluster_ca_certificate.secureFilePath)
+              TF_client_key: $(TF_client_key.secureFilePath)
+              TF_client_certificate: $(TF_client_certificate.secureFilePath)
+              TF_k8s_host: $(k8s_host)
+              TF_k8s_dpl_docker_image: "$(docker_repo_name):$(short_commmit_tag)"
+              TF_LOG: "trace"
+
+      - job: TFApply
+        displayName: TF Apply
+        dependsOn: 
+          - TFPlan
+        pool: 
+          vmImage: 'ubuntu-20.04'
+        steps:
+        
+          - task: DownloadSecureFile@1
+            name: TFCloudCredential
+            displayName: Downloading .terraformrc
+            inputs:
+              secureFile: .terraformrc
+
+          - task: DownloadSecureFile@1
+            name: TF_cluster_ca_certificate
+            displayName: Downloading cluster_ca_certificate
+            inputs:
+              secureFile: cluster_ca_certificate.crt
+
+          - task: DownloadSecureFile@1
+            name: TF_client_key
+            displayName: Downloading client_key
+            inputs:
+              secureFile: client_key.key
+
+          - task: DownloadSecureFile@1
+            name: TF_client_certificate
+            displayName: Downloading client_certificate
+            inputs:
+              secureFile: client_certificate.crt
+          
+          - task: Bash@3
+            displayName: Terraform Apply
+            inputs:
+              pwsh: true
+              targetType: 'inline'
+              workingDirectory: $(System.DefaultWorkingDirectory)/IaC
+              script: |
+                cp .terraformrc $HOME/$(TFCloudCredential.secureFilePath)
+                terraform init
+                terraform validate
+                terraform apply -auto-approve
+            env:
+              TF_cluster_ca_certificate: $(TF_cluster_ca_certificate.secureFilePath)
+              TF_client_key: $(TF_client_key.secureFilePath)
+              TF_client_certificate: $(TF_client_certificate.secureFilePath)
+              TF_k8s_host: $(k8s_host)
+              TF_k8s_dpl_docker_image: "$(docker_repo_name):$(short_commmit_tag)"
+              TF_LOG: "trace"
+
+      - job: TFDestroy
+        displayName: TF Destroy
+        dependsOn: 
+          - TFApply        
+        pool: 
+          vmImage: 'ubuntu-20.04'
+        steps:
+  
+          - deployment: ApprovalToDestroy
+            displayName: 'Approval To Destroy'
+            environment: DevOps-Approval-Gate
+        
+          - task: DownloadSecureFile@1
+            name: TFCloudCredential
+            displayName: Downloading .terraformrc
+            inputs:
+              secureFile: .terraformrc
+
+          - task: DownloadSecureFile@1
+            name: TF_cluster_ca_certificate
+            displayName: Downloading cluster_ca_certificate
+            inputs:
+              secureFile: cluster_ca_certificate.crt
+
+          - task: DownloadSecureFile@1
+            name: TF_client_key
+            displayName: Downloading client_key
+            inputs:
+              secureFile: client_key.key
+
+          - task: DownloadSecureFile@1
+            name: TF_client_certificate
+            displayName: Downloading client_certificate
+            inputs:
+              secureFile: client_certificate.crt
+          
+          - task: Bash@3
+            displayName: Terraform Apply
+            inputs:
+              pwsh: true
+              targetType: 'inline'
+              workingDirectory: $(System.DefaultWorkingDirectory)/IaC
+              script: |
+                cp .terraformrc $HOME/$(TFCloudCredential.secureFilePath)
+                terraform init
+                terraform validate
+                terraform destroy -auto-approve
+            env:
+              TF_cluster_ca_certificate: $(TF_cluster_ca_certificate.secureFilePath)
+              TF_client_key: $(TF_client_key.secureFilePath)
+              TF_client_certificate: $(TF_client_certificate.secureFilePath)
+              TF_k8s_host: $(k8s_host)
+              TF_k8s_dpl_docker_image: "$(docker_repo_name):$(short_commmit_tag)"
+              TF_LOG: "trace"
+...

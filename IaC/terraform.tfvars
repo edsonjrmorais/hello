@@ -1,0 +1,1 @@
+k8s_dpl_qty_replicas   = 3

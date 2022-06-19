@@ -1,6 +1,12 @@
 FROM python:3-alpine
 COPY ./ /.
 WORKDIR /App
+
+ARG DATABASE_URL
+ENV DATABASE_URL $DATABASE_URL
+ARG CREDENTIAL_PATH
+ENV CREDENTIAL_PATH $CREDENTIAL_PATH
+
 RUN pip install -r ./requirements.txt
 EXPOSE 8181
 CMD python3 ./main.py
